@@ -1,0 +1,6 @@
+#load module
+module load zlib/1.2.8 openssl/1.0.1e java/1.8.0_31 protobuf/2.5.0 myhadoop/Sep012015 spark/1.5.1
+fisbatch.hadoop --exclusive --ntasks-per-node=1 -c20 -N 4
+
+# load pySpark
+pyspark

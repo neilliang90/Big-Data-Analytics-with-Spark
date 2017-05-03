@@ -1,0 +1,308 @@
+from pyspark.sql.types import StringType
+from pyspark import HiveContext
+import pickle
+import numpy as np
+sqlContext = HiveContext(sc)
+from pyspark.mllib.stat import Statistics
+import pandas as pd
+from math import sqrt
+from pyspark.mllib.clustering import KMeans, KMeansModel
+from pyspark.mllib.regression import LabeledPoint, LinearRegressionWithSGD, LinearRegressionModel
+
+
+
+# read data as DataFrame and header as list 
+rdd = sc.textFile("file:///scratch/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/trip_merged").map(lambda line: [float(ele) if ele.lstrip('-').replace('.','',1).isdigit() else np.nan for ele in line.split(",")])
+header = [str.strip() for str in open('header.txt','r').readline().strip().split(",")]
+df = rdd.toDF(header).cache()
+#stat = df.describe(*header)
+#stat.rdd.saveAsTextFile("file:///scratch/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/stat")
+
+
+
+
+#***********************change rdd to sql database ****************************************************************************************#
+# register the DataFrame as a temp table so that we can query it using SQL
+df.registerTempTable("taxi")
+
+# Perform the same query as the DataFrame above and return ``explain``
+df_sql = sqlContext.sql("SELECT * FROM taxi WHERE passenger_count >0 and passenger_count < 10 and trip_time_in_secs > 0 and trip_time_in_secs < 3000 and trip_distance > 0 AND trip_distance < 25 AND fare_amount > 0 AND fare_amount < 50 AND total_amount>0 AND total_amount < 100 and tip_amount > 0 and tip_amount < 20")
+df_sql .show() # Show my result
+df_sql .registerTempTable("taxi_clean")
+#sqlContext.sql("SELECT count(*) FROM taxi_clean").show()# calculate the number of rows after cleanup
+
+
+
+
+
+
+#***********************stop here for taxi clean ****************************************************************************************#
+
+
+#calculate  features by hour and month
+avg_hour = sqlContext.sql("SELECT pickup_hour,avg(total_amount), avg( trip_distance), avg(trip_time_in_secs), avg( tip_amount), avg( payment_type), avg( passenger_count) FROM taxi_clean GROUP BY pickup_hour")
+
+avg_hour = avg_hour.rdd.map( list).collect()
+
+avg_hour = pd.DataFrame( avg_hour)
+avg_hour.columns = ['hour', 'total_amount', 'trip_distance', 'trip_time_in_secs', ' tip_amount', 'payment_type', 'passenger_count']
+
+
+avg_month = sqlContext.sql("SELECT pickup_month,avg(total_amount), avg( trip_distance), avg(trip_time_in_secs), avg( tip_amount), avg( payment_type), avg( passenger_count) FROM taxi_clean GROUP BY pickup_month")
+
+avg_month= avg_month.rdd.map( list).collect()
+
+avg_month= pd.DataFrame( avg_month)
+avg_month.columns = ['month', 'total_amount', 'trip_distance', 'trip_time_in_secs', ' tip_amount', 'payment_type', 'passenger_count']
+
+
+
+#calculate number of trips by hour and month
+
+num_trip_hour = sqlContext.sql("SELECT pickup_hour, count(*) FROM taxi_clean GROUP BY pickup_hour")
+
+num_trip_hour = num_trip_hour.rdd.map( list).collect()
+num_trip_hour = pd.DataFrame( num_trip_hour)
+
+num_trip_month = sqlContext.sql("SELECT pickup_month, count(*) FROM taxi_clean GROUP BY pickup_month")
+
+num_trip_month = num_trip_month.rdd.map( list).collect()
+num_trip_month = pd.DataFrame( num_trip_month)
+
+
+
+
+
+#################***********convert sql object to rrd to run MLlibrary ******************************************************************************#################
+################# calculate summary statistics
+taxi_stat = sqlContext.sql("SELECT passenger_count, trip_time_in_secs, trip_distance, fare_amount, surcharge, mta_tax, tip_amount, tolls_amount, total_amount, payment_type, pickup_year, pickup_month, pickup_hour FROM taxi_clean")
+data = taxi_stat.rdd.map( list)
+summary = Statistics.colStats(data)
+#correlations
+corr_matrix = Statistics.corr(data, method="pearson")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+############## regression
+regression_data = sqlContext.sql("SELECT total_amount, trip_time_in_secs, trip_distance FROM taxi_clean")
+regression_data = regression_data .rdd.map(list)
+
+# Load and parse the data
+def parsePoint(line):
+    return LabeledPoint(line[0], line[1:])
+
+#data = sc.textFile("data/mllib/ridge-data/lpsa.data")
+parsedData = regression_data.map(parsePoint)
+
+# Build the model
+model = LinearRegressionWithSGD.train(parsedData, iterations=1000, step=0.0001,intercept=True)
+model.weights
+model.intercept
+
+
+# Evaluate the model on training data
+valuesAndPreds = parsedData.map(lambda p: (p.label, model.predict(p.features)))
+
+def squares( line ):
+    return (line[0]-line[1])**2
+
+MSE = valuesAndPreds.map(squares).reduce(lambda x, y: x + y) / valuesAndPreds.count()
+print("Mean Squared Error = " + str(MSE))
+
+# Save and load model
+model.save(sc, "/gpfs/scratchfs1/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/guannan_results/regression_tip_on_time_distance")
+#linearModel1 = LinearRegressionModel.load(sc, "/gpfs/scratchfs1/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/guannan_results/regression_total_on_time_distance")
+
+
+
+
+####regression total_amount_toll regression on trip time
+data1 = sqlContext.sql("SELECT total_amount-tolls_amount as total_amount_less_tolls ,  trip_time_in_secs FROM taxi_clean").rdd.map(list)
+# Load and parse the data
+def parsePoint(line):
+    return LabeledPoint(line[0], line[1:])
+
+
+parsedData = data1.map(parsePoint)
+
+# Build the model
+model = LinearRegressionWithSGD.train(parsedData, iterations=1000, step=0.000001,intercept=True)
+model.weights
+model.intercept
+
+
+# Evaluate the model on training data
+valuesAndPreds = parsedData.map(lambda p: (p.label, model.predict(p.features)))
+
+def squares( line ):
+    return (line[0]-line[1])**2
+
+MSE = valuesAndPreds.map(squares).reduce(lambda x, y: x + y) / valuesAndPreds.count()
+print("Mean Squared Error = " + str(MSE))
+
+model.save(sc, "/gpfs/scratchfs1/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/guannan_results/regression_total_tolls_on_trip_time")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############clustering
+pickup_data = sqlContext.sql("SELECT pickup_longitude, pickup_latitude FROM taxi_clean where pickup_longitude>-74 and pickup_longitude < -73.8 and pickup_latitude<42 and pickup_latitude>39 ")
+#pickup_data = sqlContext.sql("SELECT pickup_longitude, pickup_latitude FROM taxi_clean").rdd.map(lambda x: ','.join(map(str,x)))
+#pickup_data.saveAsTextFile('file:///gpfs/scratchfs1/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/pickup_position/')
+clusters = KMeans.train(pickup_data.rdd.map(np.array), 21, maxIterations=1000, initializationMode="random")
+
+
+# Evaluate clustering by computing Within Set Sum of Squared Errors
+def error(point):
+    center = clusters.centers[clusters.predict(point)]
+    return sqrt(sum([x**2 for x in (point - center)]))
+
+WSSSE = pickup_data.rdd.map(lambda point: error(np.array(point))).reduce(lambda x, y: x + y)
+print("Within Set Sum of Squared Error = " + str(WSSSE))
+
+clusters.save(sc, "/gpfs/scratchfs1/BigDataProject_gul15103_ajp06003/NYCtaxi/03SparkData/data/guannan_results/KMeans_pickup_position")
+#sameModel = KMeansModel.load(sc, "target/org/apache/spark/PythonKMeansExample/KMeansModel")
+
+clusters= pd.DataFrame(clusters.clusterCenters)
+clusters.columns = ['longitude', 'latitude']
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################***********Calculate regression based on formulation ******************************************************************************#################
+
+####regression total_amount_toll regression on trip time
+data1 = sqlContext.sql("SELECT total_amount-tolls_amount as total_amount_less_tolls , trip_time_in_secs FROM taxi_clean").rdd.map(list)
+
+
+Xsum = data1.map(lambda line: line[1]).reduce( lambda a, b: a+b)
+Ysum = data1.map(lambda line: line[0]).reduce( lambda a, b: a+b)
+XY = data1.map(lambda line: line[0]*line[1]).reduce( lambda a, b: a+b)
+X2sum = data1.map(lambda line: line[1]**2).reduce( lambda a, b: a+b)
+n = data1.count()
+beta1 = ( n*XY - Xsum*Ysum)/( n*X2sum - ( Xsum)**2)
+beta0 = ( Ysum - beta1*Xsum)/n
+
+
+
+
+
+
+#### regression total_amount on trip_time and trip_distance
+data2 = sqlContext.sql("SELECT total_amount, trip_time_in_secs, trip_distance FROM taxi_clean")
+data2 = data2 .rdd.map(list)
+
+Y_sum = data2.map( lambda line: line[0]).reduce( lambda a, b: a+b)
+
+X1_sum = data2.map( lambda line: line[1]).reduce( lambda a, b: a+b)
+X1_square_sum = data2.map( lambda line: line[1]**2).reduce( lambda a, b: a+b)
+
+X2_sum = data2.map( lambda line: line[2]).reduce( lambda a, b: a+b)
+X2_square_sum = data2.map( lambda line: line[2]**2).reduce( lambda a, b: a+b)
+
+X1Y_sum = data2.map( lambda line: line[0]*line[1]).reduce( lambda a, b: a+b)
+X2Y_sum = data2.map( lambda line: line[0]*line[2]).reduce( lambda a, b: a+b)
+
+X1X2_sum = data2.map( lambda line: line[1]*line[2]).reduce( lambda a, b: a+b)
+
+n = data2.count()
+
+sum_square_x1 = X1_square_sum - X1_sum**2/n
+sum_square_x2 = X2_square_sum - X2_sum**2/n
+sum_x1_y = X1Y_sum - X1_sum*Y_sum/n
+sum_x2_y = X2Y_sum - X2_sum*Y_sum/n
+sum_x1_x2 = X1X2_sum - X1_sum*X2_sum/n
+
+beta1 = ( sum_square_x2*sum_x1_y - sum_x1_x2*sum_x2_y )/( sum_square_x1 * sum_square_x2 - sum_x1_x2**2 )
+beta2 = ( sum_square_x1*sum_x2_y - sum_x1_x2*sum_x1_y )/( sum_square_x1 * sum_square_x2 - sum_x1_x2**2 )
+
+avr = sqlContext.sql("SELECT avg( total_amount ), avg( trip_time_in_secs ), avg( trip_distance) FROM taxi_clean")
+
+ beta0 = 14.568686 - beta1*677.189437 - beta2* 2.919728
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#***************************************************************************************************************#
+# count total_amount by payment
+df.rdd.map(lambda x: (x.payment_type,x.total_amount)).countByKey()
+df.rdd.map(lambda x: (x.payment_type,(x.total_amount,1))).reduceByKey(lambda a,b: (a[0] + b[0], a[1] + b[1]))
+
+df.rdd.map(lambda x: (x.payment_type,(x.total_amount,1)))
