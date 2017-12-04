@@ -1,0 +1,10 @@
+from pyspark import HiveContext
+sqlContext = HiveContext(sc)
+
+df = spark.read.csv('file:///scratch/gul15103/NYCtaxi/decompressed/FOIL201*/trip_data_*.csv',header='true', inferSchema='true') 
+
+df.dtypes
+df.describe().show()
+#Convert dataframe to sql database
+df.registerTempTable( "df_table")
+sqlContext.sql('select * from df_table').show(5)
